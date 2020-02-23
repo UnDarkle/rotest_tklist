@@ -3,7 +3,8 @@ import sys
 from functools import partial
 
 import tkinter as tk
-from rotest.core import TestCase, TestFlow, TestBlock, TestSuite
+from tkinter import ttk
+from rotest.core import TestCase, TestFlow, TestBlock, TestSuite, Pipe
 
 
 def tk_list_option(parser):
@@ -15,24 +16,24 @@ def tk_list_option(parser):
 def tk_list_action(tests, config):
     """Open the Tkinter tests explorer if 'tklist' flag is on."""
     if getattr(config, "tklist", False):
-        _tk_list_tests(tests, config)
+        _tk_list_tests(tests)
         sys.exit(0)
 
 
-def _tk_list_tests(tests, config):
+def _tk_list_tests(tests):
     """Create the tests explorer main window."""
     window = tk.Tk()
-    tab_control = tk.ttk.Notebook(window)
+    tab_control = ttk.Notebook(window)
     tab_control.bind("<ButtonRelease-1>", partial(forget_children_tabs,
                                                   tab_control=tab_control))
 
-    main_tab = tk.ttk.Frame(tab_control)
+    main_tab = ttk.Frame(tab_control)
     tab_control.add(main_tab, text='Main')
     tab_control.pack(expand=1, fill='both')
 
-    list_frame = tk.ttk.Frame(main_tab)
+    list_frame = ttk.Frame(main_tab)
     list_frame.grid(column=0, row=0, sticky=tk.N)
-    desc_frame = tk.ttk.Frame(main_tab)
+    desc_frame = ttk.Frame(main_tab)
     desc_frame.grid(column=1, row=0, sticky=tk.N)
 
     desc = tk.Text(desc_frame)
@@ -51,7 +52,7 @@ def _tk_list_tests(tests, config):
         try:
             TestSuite(tests=[test],
                       run_data=None,
-                      config=config,
+                      config=None,
                       skip_init=False,
                       save_state=False,
                       enable_debug=False,
@@ -104,21 +105,21 @@ def _update_desc(_, text, test):
 
 def _explore_subtest(_, tab_control, test):
     """Open another tab for the give test or test component."""
-    sub_tab = tk.ttk.Frame(tab_control)
+    sub_tab = ttk.Frame(tab_control)
     sub_tab.pack(fill='both')
     tab_control.add(sub_tab, text=test.__name__)
     tab_control.select(tab_control.index(tk.END)-1)
     for class_key, explorer in _class_to_explorer.items():
         if issubclass(test, class_key):
-            explorer(sub_tab, test)
+            explorer(tab_control, sub_tab, test)
             return
 
 
-def _explore_case(frame, test):
+def _explore_case(_, __, frame, test):
     """Show metadata for a TestCase."""
-    list_frame = tk.ttk.Frame(frame)
+    list_frame = ttk.Frame(frame)
     list_frame.grid(column=0, row=0, sticky=tk.N)
-    desc_frame = tk.ttk.Frame(frame)
+    desc_frame = ttk.Frame(frame)
     desc_frame.grid(column=1, row=0, sticky=tk.N)
 
     desc = tk.Text(desc_frame)
@@ -132,12 +133,189 @@ def _explore_case(frame, test):
         label.grid(column=0, row=index, sticky=tk.W+tk.E)
 
 
-def _explore_flow(frame, test):
-    pass
+class Redirector(object):
+    def __init__(self, var_name, pipe_to=None, pipe_from=None):
+        self.var_name = var_name
+        self.pipe_to = pipe_to
+        self.pipe_from = pipe_from
+
+    def __str__(self):
+        if self.pipe_to:
+            return "{} -> {}".format(self.var_name, self.pipe_to)
+
+        if self.pipe_from:
+            return "{} <- {}".format(self.var_name, self.pipe_from)
+
+        return self.var_name
+
+    def __repr__(self):
+        return self.__str__()
+
+    @property
+    def name(self):
+        return self.pipe_from or self.var_name
+
+    def __eq__(self, other):
+        if isinstance(other, Redirector):
+            print('greg')
+            return (other.pipe_to or self.name) == (other.pipe_to or other.name)
+
+        else:
+            print("stas")
+        return self.name == other
+
+    def __hash__(self):
+        return hash(self.var_name)
+
+
+def _explore_flow(tab_control, frame, test):
+    """Show metadata for a flow."""
+    list_frame = ttk.Frame(frame)
+    list_frame.grid(column=0, row=0, sticky=tk.N)
+    desc_frame = ttk.Frame(frame)
+    desc_frame.grid(column=1, row=0, sticky=tk.N)
+
+    desc = tk.Text(desc_frame)
+    desc.grid(column=0, row=0)
+
+    total_outputs = {Redirector(request.name): test
+                     for request in test.get_resource_requests()}
+
+    for key, value in test.common.items():
+        if isinstance(value, Pipe):
+            total_outputs[Redirector(key, pipe_from=value.parameter_name)] = \
+                test
+
+        else:
+            total_outputs[Redirector(key)] = test
+
+    unconnected_inputs = set()
+    total_inputs = {}
+    test._tklist_outputs = {key: [] for key in total_outputs.keys()}
+
+    for index, sub_test in enumerate(test.blocks):
+        btn = tk.Button(list_frame, text=sub_test.__name__)
+        btn.grid(column=0, row=index, sticky=tk.W+tk.E)
+
+        btn.bind("<Enter>", partial(_update_flow_desc, text=desc, test=sub_test))
+        btn.bind("<Leave>", partial(_update_flow_desc, text=desc, test=test))
+        btn.bind("<Button-1>", partial(_explore_subtest,
+                                       tab_control=tab_control,
+                                       test=test))
+
+        sub_test._tklist_inputs = {}
+        block_inputs = _get_inputs(sub_test)
+        for block_input in block_inputs:
+            print("searching for", block_input, "in", list(total_outputs.keys()))
+            matching_output = total_outputs.get(block_input, None)
+            if not matching_output:
+                if block_input in sub_test.common:
+                    matching_output = 'parameter'
+
+                else:
+                    has_default_value = False
+                    if issubclass(sub_test, TestBlock):
+                        actual_input = sub_test.get_inputs().get(block_input,
+                                                                 None)
+                        if actual_input:
+                            has_default_value = actual_input.is_optional()
+
+                    if has_default_value:
+                        matching_output = 'default value'
+
+                    else:
+                        matching_output = ''
+                        unconnected_inputs.add(block_input)
+                        btn.config(bg='red')
+
+            else:
+                matching_output._tklist_outputs[block_input.name].append(
+                                                    sub_test.__name__)
+                matching_output = matching_output.__name__
+
+            total_inputs[block_input] = total_inputs.get(block_input, []) + \
+                                        [sub_test.__name__]
+
+            sub_test._tklist_inputs[block_input] = matching_output
+
+        block_outputs = _update_outputs(sub_test, total_outputs)
+        sub_test._tklist_outputs = {key: [] for key in block_outputs}
+
+    _update_flow_desc(None, desc, test)
     # TODO: init, catching validation error and informing about it
 
 
-def _explore_block(frame, test):
+def _update_outputs(flow_component, target_outputs):
+    outputs = set()
+    if issubclass(flow_component, TestBlock):
+        for output in flow_component.get_outputs().keys():
+            outputs.add(Redirector(output))
+
+    for key, value in flow_component.common.items():
+        if isinstance(value, Pipe):
+            if key in outputs:
+                outputs -= {key}
+                outputs.add(Redirector(key, pipe_to=value.parameter_name))
+
+    target_outputs.update({key: flow_component
+                           for key in outputs})
+
+    return outputs
+
+
+def _get_inputs(flow_component):
+    inputs = set()
+    if issubclass(flow_component, TestBlock):
+        for input in flow_component.get_inputs().keys():
+            inputs.add(Redirector(input))
+
+    else:
+        for sub_component in flow_component.blocks:
+            inputs.union(_get_inputs(sub_component))
+
+    for key, value in flow_component.common.items():
+        if isinstance(value, Pipe):
+            if key in inputs:
+                inputs -= {key}
+                inputs.add(Redirector(key, pipe_from=value.parameter_name))
+
+    return inputs
+
+
+def _update_flow_desc(_, text, test):
+    """Update text according to the metadata of a test.
+
+    Args:
+        text (tkinter.Text): text to update.
+        test (type): test class to update according to.
+    """
+    text.delete("1.0", tk.END)
+    if test:
+        text.insert(tk.END, test.__name__+"\n")
+        text.insert(tk.END, "Resource requests:\n")
+        for request in test.get_resource_requests():
+            text.insert(tk.END, "  {} = {}({})\n".format(request.name,
+                                                         request.type.__name__,
+                                                         request.kwargs))
+
+        text.insert(tk.END, "\n")
+        if test.__doc__:
+            text.insert(tk.END, test.__doc__)
+
+        if hasattr(test, '_tklist_inputs'):
+            text.insert(tk.END, "\nInputs:\n")
+            for input_name, input_target in test._tklist_inputs.items():
+                text.insert(tk.END, "    {} <- {}\n".format(input_name,
+                                                            input_target))
+
+        if hasattr(test, '_tklist_outputs'):
+            text.insert(tk.END, "\nOutputs:\n")
+            for output_name, output_target in test._tklist_outputs.items():
+                text.insert(tk.END, "    {} -> {}\n".format(output_name,
+                                                    ', '.join(output_target)))
+
+
+def _explore_block(_, frame, test):
     pass
     # TODO: init, catching validation error and informing about it
 
