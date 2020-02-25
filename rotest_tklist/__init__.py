@@ -171,8 +171,9 @@ class Redirector(object):
 
 
 class FlowComponentData(object):
-    def __init__(self, cls):
+    def __init__(self, cls, indent=0):
         self.cls = cls
+        self.indent = indent
         self.name = cls.__name__
 
         self.actual_inputs = {}  # inputs name -> provider name
@@ -190,7 +191,8 @@ class FlowComponentData(object):
                           cls.get_resource_requests()]
 
         if self.is_flow:
-            self.create_sub_data()
+            for block_class in self.cls.blocks:
+                self.children.append(FlowComponentData(block_class, indent+1))
 
         else:
             for name, instance in cls.get_inputs().items():
@@ -207,10 +209,6 @@ class FlowComponentData(object):
 
         self.handle_common()
         self.find_connections()
-
-    def create_sub_data(self):
-        for block_class in self.cls.blocks:
-            self.children.append(FlowComponentData(block_class))
 
     def handle_common(self):
         for name, value in self.cls.common.items():
@@ -254,7 +252,8 @@ class FlowComponentData(object):
 
         else:
             for child in self.children:
-                total_connections.extend(child.propagate_value(name, value, provider))
+                total_connections.extend(child.propagate_value(
+                                                        name, value, provider))
 
         return total_connections
 
@@ -326,7 +325,8 @@ class FlowComponentData(object):
             self._description += "    {} -> ".format(output)
             if output != actual_output:
                 self._description += "{} -> ".format(actual_output)
-            self._description += "{}\n".format(', '.join(self.actual_outputs[actual_output]))
+            self._description += "{}\n".format(
+                                ', '.join(self.actual_outputs[actual_output]))
 
         if self.errors:
             self._description += "\nErrors:\n"
@@ -344,7 +344,6 @@ class FlowComponentData(object):
 
 
 def _explore_flow(tab_control, frame, test):
-
     """Show metadata for a flow."""
     list_frame = ttk.Frame(frame)
     list_frame.grid(column=0, row=0, sticky=tk.N)
@@ -359,17 +358,21 @@ def _explore_flow(tab_control, frame, test):
 
     for index, sub_data in enumerate(flow_data.iterate()):
         btn = tk.Button(list_frame, text=sub_data.name)
-        btn.grid(column=0, row=index, sticky=tk.W+tk.E)
+        btn.grid(column=sub_data.indent, row=index, sticky=tk.W+tk.E)
 
-        btn.bind("<Enter>", partial(_update_flow_desc, text=desc, test=sub_data))
-        btn.bind("<Leave>", partial(_update_flow_desc, text=desc, test=None))
+        btn.bind("<Enter>", partial(_update_flow_desc, text=desc,
+                                    test=sub_data))
+        btn.bind("<Leave>", partial(_update_flow_desc, text=desc,
+                                    test=None))
         if sub_data != flow_data:
             btn.bind("<Button-1>", partial(_explore_subtest,
                                            tab_control=tab_control,
-                                           test=test))
+                                           test=sub_data.cls))
 
         if sub_data.errors:
             btn.config(bg='red')
+
+    _update_flow_desc(None, desc, flow_data)
 
 
 def _update_flow_desc(_, text, test):
@@ -381,7 +384,7 @@ def _update_flow_desc(_, text, test):
     """
     text.delete("1.0", tk.END)
     if test:
-        text.insert(tk.END, test.name+"\n")
+        text.insert(tk.END, test.cls.__name__+"\n")
         text.insert(tk.END, "Resource requests:\n")
         for request in test.cls.get_resource_requests():
             text.insert(tk.END, "  {} = {}({})\n".format(request.name,
@@ -396,7 +399,7 @@ def _update_flow_desc(_, text, test):
 
 
 def _explore_block(_, frame, test):
-    pass
+    return _explore_flow(None, frame, test)
     # TODO: init, catching validation error and informing about it
 
 
