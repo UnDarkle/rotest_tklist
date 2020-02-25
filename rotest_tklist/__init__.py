@@ -115,11 +115,11 @@ def _explore_subtest(_, tab_control, test):
     tab_control.select(tab_control.index(tk.END)-1)
     for class_key, explorer in _class_to_explorer.items():
         if issubclass(test, class_key):
-            explorer(tab_control, sub_tab, test)
+            explorer(sub_tab, test)
             return
 
 
-def _explore_case(_, __, frame, test):
+def _explore_case(frame, test):
     """Show metadata for a TestCase."""
     list_frame = ttk.Frame(frame)
     list_frame.grid(column=0, row=0, sticky=tk.N)
@@ -137,44 +137,15 @@ def _explore_case(_, __, frame, test):
         label.grid(column=0, row=index, sticky=tk.W+tk.E)
 
 
-class Redirector(object):
-    def __init__(self, var_name, pipe_to=None, pipe_from=None):
-        self.var_name = var_name
-        self.pipe_to = pipe_to
-        self.pipe_from = pipe_from
-
-    def __str__(self):
-        if self.pipe_to:
-            return "{} -> {}".format(self.var_name, self.pipe_to)
-
-        if self.pipe_from:
-            return "{} <- {}".format(self.var_name, self.pipe_from)
-
-        return self.var_name
-
-    def __repr__(self):
-        return self.__str__()
-
-    @property
-    def name(self):
-        return self.pipe_from or self.pipe_to or self.var_name
-
-    def __eq__(self, other):
-        if isinstance(other, Redirector):
-            return other.name == self.name
-
-        print("trying to compare to", type(other), other)
-        return self.name == other
-
-    def __hash__(self):
-        return hash(self.name)
-
-
 class FlowComponentData(object):
-    def __init__(self, cls, indent=0):
+    def __init__(self, cls, indent=0, parent=None):
         self.cls = cls
         self.indent = indent
+        self.parent = parent
         self.name = cls.__name__
+        self.long_name = cls.__name__
+        if indent > 1:
+            self.long_name = "{}.{}".format(self.parent.long_name, self.name)
 
         self.actual_inputs = {}  # inputs name -> provider name
         self.actual_outputs = {}  # outputs name -> list of usages
@@ -183,6 +154,7 @@ class FlowComponentData(object):
         self.outputs = {}  # original input name -> actual input name
 
         self.errors = []
+        self.unconnected_inputs = []
         self._description = None
 
         self.is_flow = issubclass(cls, TestFlow)
@@ -192,13 +164,19 @@ class FlowComponentData(object):
 
         if self.is_flow:
             for block_class in self.cls.blocks:
-                self.children.append(FlowComponentData(block_class, indent+1))
+                self.children.append(FlowComponentData(block_class, indent+1,
+                                                       self))
+
+            for name, value in cls.common.items():
+                self.outputs[name] = name
+                self.actual_outputs[name] = []
 
         else:
             for name, instance in cls.get_inputs().items():
                 self.inputs[name] = name
                 if instance.is_optional():
-                    self.actual_inputs[name] = '(default value)'
+                    self.actual_inputs[name] = '(default value = %s)' % \
+                                                            instance.default
 
                 else:
                     self.actual_inputs[name] = ''
@@ -242,7 +220,7 @@ class FlowComponentData(object):
 
                 else:
                     self.actual_inputs[name] = provider
-                    return [self.name]
+                    return [self.long_name]
 
             elif name in self.actual_outputs and isinstance(value, Pipe):
                 if value.parameter_name != name:
@@ -261,28 +239,32 @@ class FlowComponentData(object):
         if not self.is_flow:
             for name, value in self.cls.common.items():
                 if name in self.actual_inputs and not isinstance(value, Pipe):
-                    self.actual_inputs[name] = '(parameter)'
+                    self.actual_inputs[name] = '(parameter = %s)' % value
 
         else:
             for name, value in self.cls.common.items():
-                is_used = False
+                total_usages = []
                 for child in self.children:
-                    is_used = bool(child.propagate_value(
-                                        name, value, '(parent)')) or is_used
+                    total_usages.extend(child.propagate_value(name, value,
+                                                      '(parent = %s)' % value))
 
-                if not is_used:
+                if total_usages:
+                    if name in self.actual_outputs:
+                        self.actual_outputs[name].extend(total_usages)
+
+                else:
                     self.errors.append("Unknown input %r" % name)
 
     def apply_resources(self):
         for resource in self.resources:
-            self.propagate_value(resource, None, '(parent)')
+            self.propagate_value(resource, None, '(parent resource)')
 
     def connect_children(self):
         for index, child in enumerate(self.children):
             for output, connections in child.actual_outputs.items():
                 for sibling in self.children[index+1:]:
                     connections.extend(
-                        sibling.propagate_value(output, None, child.name))
+                        sibling.propagate_value(output, None, child.long_name))
 
     def find_connections(self):
         # parent common value
@@ -303,24 +285,43 @@ class FlowComponentData(object):
         for input_name, provider in self.actual_inputs.items():
             if not provider:
                 self.errors.append("Input %r is not connected!" % input_name)
+                self.unconnected_inputs.append(
+                                    "{}.{}".format(self.long_name, input_name))
 
         for child in self.children:
             child.find_unconnected()
             self.errors.extend(child.errors)
+            self.unconnected_inputs.extend(child.unconnected_inputs)
+
+        if self.is_flow and self.indent > 0:
+            shadow = FlowComponentData(self.cls)
+            shadow.find_unconnected()
+            self.inputs.update({name: name for name in shadow.unconnected_inputs})
+            self.actual_inputs.update({name: '' for name in shadow.unconnected_inputs})
 
     def get_description(self):
         if self._description:
             return self._description
 
         self._description = ""
-        self._description += "\nInputs:\n"
-        for input, actual_input in self.inputs.items():
-            self._description += "    {} <- ".format(input)
-            if input != actual_input:
+        if self.is_flow:
+            self._description += "Required Inputs:\n"
+
+        else:
+            self._description += "Inputs:\n"
+
+        for name, actual_input in self.inputs.items():
+            self._description += "    {} <- ".format(name)
+            if name != actual_input:
                 self._description += "{} <- ".format(actual_input)
             self._description += "{}\n".format(self.actual_inputs[actual_input])
 
-        self._description += "\nOutputs:\n"
+        if self.is_flow:
+            self._description += "\nCommon:\n"
+
+        else:
+            self._description += "\nOutputs:\n"
+
         for output, actual_output in self.outputs.items():
             self._description += "    {} -> ".format(output)
             if output != actual_output:
@@ -343,31 +344,32 @@ class FlowComponentData(object):
                 yield sub_component
 
 
-def _explore_flow(tab_control, frame, test):
+def _explore_flow(frame, test):
     """Show metadata for a flow."""
     list_frame = ttk.Frame(frame)
-    list_frame.grid(column=0, row=0, sticky=tk.N)
+    list_frame.grid(column=0, row=0, sticky=tk.N, rowspan=2)
     desc_frame = ttk.Frame(frame)
     desc_frame.grid(column=1, row=0, sticky=tk.N)
+    connection_frame = ttk.Frame(frame)
+    connection_frame.grid(column=1, row=1, sticky=tk.N)
 
     desc = tk.Text(desc_frame)
     desc.grid(column=0, row=0)
+
+    connections = tk.Text(connection_frame)
+    connections.grid(column=0, row=0)
 
     flow_data = FlowComponentData(test)
     flow_data.find_unconnected()
 
     for index, sub_data in enumerate(flow_data.iterate()):
-        btn = tk.Button(list_frame, text=sub_data.name)
+        btn = tk.Label(list_frame, text=sub_data.name)
         btn.grid(column=sub_data.indent, row=index, sticky=tk.W+tk.E)
 
-        btn.bind("<Enter>", partial(_update_flow_desc, text=desc,
-                                    test=sub_data))
-        btn.bind("<Leave>", partial(_update_flow_desc, text=desc,
-                                    test=None))
-        if sub_data != flow_data:
-            btn.bind("<Button-1>", partial(_explore_subtest,
-                                           tab_control=tab_control,
-                                           test=sub_data.cls))
+        btn.bind("<Enter>", partial(_update_flow_desc, desc=desc,
+                                    connections=connections, test=sub_data))
+        btn.bind("<Leave>", partial(_update_flow_desc, desc=desc,
+                                    connections=connections, test=None))
 
         if sub_data.errors:
             btn.config(bg='red')
@@ -375,34 +377,30 @@ def _explore_flow(tab_control, frame, test):
     _update_flow_desc(None, desc, flow_data)
 
 
-def _update_flow_desc(_, text, test):
+def _update_flow_desc(_, desc, connections, test):
     """Update text according to the metadata of a test.
 
     Args:
         text (tkinter.Text): text to update.
         test (type): test class to update according to.
     """
-    text.delete("1.0", tk.END)
+    desc.delete("1.0", tk.END)
+    connections.delete("1.0", tk.END)
     if test:
-        text.insert(tk.END, test.cls.__name__+"\n")
-        text.insert(tk.END, "Resource requests:\n")
+        desc.insert(tk.END, test.cls.__name__+"\n")
+        desc.insert(tk.END, "Resource requests:\n")
         for request in test.cls.get_resource_requests():
-            text.insert(tk.END, "  {} = {}({})\n".format(request.name,
+            desc.insert(tk.END, "  {} = {}({})\n".format(request.name,
                                                          request.type.__name__,
                                                          request.kwargs))
 
-        text.insert(tk.END, "\n")
+        desc.insert(tk.END, "\n")
+
         if test.cls.__doc__:
-            text.insert(tk.END, test.cls.__doc__)
+            desc.insert(tk.END, test.cls.__doc__)
 
-        text.insert(tk.END, test.get_description())
-
-
-def _explore_block(_, frame, test):
-    return _explore_flow(None, frame, test)
-    # TODO: init, catching validation error and informing about it
+        connections.insert(tk.END, test.get_description())
 
 
 _class_to_explorer = {TestCase: _explore_case,
-                      TestFlow: _explore_flow,
-                      TestBlock: _explore_block}
+                      TestFlow: _explore_flow}
