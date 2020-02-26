@@ -44,8 +44,8 @@ def _tk_list_tests(tests):
         btn = tk.Button(list_frame, text=test.__name__)
         btn.grid(column=0, row=index, sticky=tk.W+tk.E)
 
-        btn.bind("<Enter>", partial(_update_desc, text=desc, test=test))
-        btn.bind("<Leave>", partial(_update_desc, text=desc, test=None))
+        btn.bind("<Enter>", partial(_update_desc, desc=desc, test=test))
+        btn.bind("<Leave>", partial(_update_desc, desc=desc, test=None))
         btn.bind("<Button-1>", partial(_explore_subtest,
                                        tab_control=tab_control,
                                        test=test))
@@ -82,30 +82,30 @@ def forget_children_tabs(_, tab_control):
     tab_control.pack()
 
 
-def _update_desc(_, text, test):
+def _update_desc(_, desc, test):
     """Update text according to the metadata of a test.
 
     Args:
-        text (tkinter.Text): text to update.
+        desc (tkinter.Text): text to update.
         test (type): test class to update according to.
     """
-    text.delete("1.0", tk.END)
+    desc.delete("1.0", tk.END)
     if test:
-        text.insert(tk.END, test.__name__+"\n")
-        text.insert(tk.END, "Tags: {}\n".format(test.TAGS))
-        text.insert(tk.END, "Timeout: {} min\n".format(test.TIMEOUT/60.0))
-        text.insert(tk.END, "Resource requests:\n")
+        desc.insert(tk.END, test.__name__ + "\n")
+        desc.insert(tk.END, "Tags: {}\n".format(test.TAGS))
+        desc.insert(tk.END, "Timeout: {} min\n".format(test.TIMEOUT / 60.0))
+        desc.insert(tk.END, "Resource requests:\n")
         for request in test.get_resource_requests():
-            text.insert(tk.END, "  {} = {}({})\n".format(request.name,
+            desc.insert(tk.END, "  {} = {}({})\n".format(request.name,
                                                          request.type.__name__,
                                                          request.kwargs))
 
-        text.insert(tk.END, "\n")
+        desc.insert(tk.END, "\n")
         if test.__doc__:
-            text.insert(tk.END, test.__doc__)
+            desc.insert(tk.END, test.__doc__)
 
         if hasattr(test, '_tklist_error'):
-            text.insert(tk.END, "\nErrors:\n{}".format(test._tklist_error))
+            desc.insert(tk.END, "\nErrors:\n{}".format(test._tklist_error))
 
 
 def _explore_subtest(_, tab_control, test):
@@ -139,6 +139,11 @@ def _explore_case(frame, test):
 
 
 class FlowComponentData(object):
+    """Data wrapper class for flow components.
+
+    This class calculates the input/output connectivity of the component
+    recursively and finds errors.
+    """
     def __init__(self, cls, indent=0, parent=None):
         self.cls = cls
         self.indent = indent
@@ -191,6 +196,7 @@ class FlowComponentData(object):
         self.find_connections()
 
     def handle_common(self):
+        """Scan the common, applying Pipes and finding unknown parameters."""
         for name, value in self.cls.common.items():
             if name in self.inputs:
                 if isinstance(value, Pipe) and value.parameter_name != name:
@@ -210,6 +216,13 @@ class FlowComponentData(object):
                     self.errors.append("Unknown input %r" % name)
 
     def propagate_value(self, name, value, provider):
+        """Try to connect a value into the component's inputs.
+
+        Args:
+            name (str): name of the input to find.
+            value (object): value to propagate (if known in advance).
+            provider (str): which component provided the value.
+        """
         total_connections = []
         if not self.is_flow:
             if name in self.actual_inputs:
@@ -238,6 +251,7 @@ class FlowComponentData(object):
         return total_connections
 
     def apply_common(self):
+        """Connect values in the common to inputs/sub-components."""
         if not self.is_flow:
             for name, value in self.cls.common.items():
                 if name in self.actual_inputs and not isinstance(value, Pipe):
@@ -258,10 +272,12 @@ class FlowComponentData(object):
                     self.errors.append("Unknown input %r" % name)
 
     def apply_resources(self):
+        """Connect the requested resources to inputs/sub-components."""
         for resource in self.resources:
             self.propagate_value(resource, None, '(parent resource)')
 
     def connect_children(self):
+        """Connect children's outputs to their siblings' inputs."""
         for index, child in enumerate(self.children):
             for output, connections in child.actual_outputs.items():
                 for sibling in self.children[index+1:]:
@@ -269,6 +285,7 @@ class FlowComponentData(object):
                         sibling.propagate_value(output, None, child.long_name))
 
     def find_connections(self):
+        """Find all connections of inputs and outputs recursively."""
         # parent common value
         # child common value (overrides parent)
         # parent resource
@@ -284,6 +301,7 @@ class FlowComponentData(object):
             child.apply_resources()
 
     def find_unconnected(self):
+        """Find unconnected inputs and register them as errors."""
         for input_name, provider in self.actual_inputs.items():
             if not provider:
                 self.errors.append("Input %r is not connected!" % input_name)
@@ -302,6 +320,7 @@ class FlowComponentData(object):
             self.actual_inputs.update({name: '' for name in shadow.unconnected_inputs})
 
     def get_description(self):
+        """Return a description string for the component's connectivity."""
         if self._description:
             return self._description
 
@@ -339,6 +358,7 @@ class FlowComponentData(object):
         return self._description
 
     def iterate(self):
+        """Yield the component data wrapper and it sub components."""
         yield self
 
         for child in self.children:
@@ -385,11 +405,12 @@ MODE_TO_STRING = {MODE_CRITICAL: 'Critial',
 
 
 def _update_flow_desc(_, desc, connections, test):
-    """Update text according to the metadata of a test.
+    """Update text according to the metadata of a flow component.
 
     Args:
-        text (tkinter.Text): text to update.
-        test (type): test class to update according to.
+        desc (tkinter.Text): description field to update.
+        connections (tkinter.Text): connectivity field to update.
+        test (FlowComponentData): flow component data to update according to.
     """
     desc.delete("1.0", tk.END)
     connections.delete("1.0", tk.END)
