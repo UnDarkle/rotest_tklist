@@ -4,7 +4,8 @@ from functools import partial
 
 import tkinter as tk
 from tkinter import ttk
-from rotest.core import TestCase, TestFlow, TestBlock, TestSuite, Pipe
+from rotest.core import (TestCase, TestFlow, TestBlock, TestSuite, Pipe,
+                         MODE_CRITICAL, MODE_OPTIONAL, MODE_FINALLY)
 
 
 def tk_list_option(parser):
@@ -142,8 +143,9 @@ class FlowComponentData(object):
         self.cls = cls
         self.indent = indent
         self.parent = parent
-        self.name = cls.__name__
-        self.long_name = cls.__name__
+        self.name = self.cls.common.pop('name', self.cls.__name__)
+        self.mode = self.cls.common.pop('mode', self.cls.mode)
+        self.long_name = self.name
         if indent > 1:
             self.long_name = "{}.{}".format(self.parent.long_name, self.name)
 
@@ -374,7 +376,12 @@ def _explore_flow(frame, test):
         if sub_data.errors:
             btn.config(bg='red')
 
-    _update_flow_desc(None, desc, flow_data)
+    _update_flow_desc(None, desc, connections, flow_data)
+
+
+MODE_TO_STRING = {MODE_CRITICAL: 'Critial',
+                  MODE_OPTIONAL: 'Optional',
+                  MODE_FINALLY: 'Finally'}
 
 
 def _update_flow_desc(_, desc, connections, test):
@@ -388,6 +395,7 @@ def _update_flow_desc(_, desc, connections, test):
     connections.delete("1.0", tk.END)
     if test:
         desc.insert(tk.END, test.cls.__name__+"\n")
+        desc.insert(tk.END, "Mode = {}\n".format(MODE_TO_STRING[test.mode]))
         desc.insert(tk.END, "Resource requests:\n")
         for request in test.cls.get_resource_requests():
             desc.insert(tk.END, "  {} = {}({})\n".format(request.name,
