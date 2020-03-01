@@ -4,6 +4,8 @@ from functools import partial
 
 import tkinter as tk
 from tkinter import ttk
+from tkinter.messagebox import showinfo, showerror
+from rotest.management.client.result_client import ClientResultManager
 from rotest.core import (TestCase, TestFlow, TestBlock, TestSuite, Pipe,
                          MODE_CRITICAL, MODE_OPTIONAL, MODE_FINALLY)
 
@@ -19,6 +21,10 @@ def tk_list_action(tests, config):
     if getattr(config, "tklist", False):
         _tk_list_tests(tests)
         sys.exit(0)
+
+
+TEXTBOX_WIDTH = 80
+TEXTBOX_HEIGHT = 36
 
 
 def _tk_list_tests(tests):
@@ -37,8 +43,13 @@ def _tk_list_tests(tests):
     desc_frame = ttk.Frame(main_tab)
     desc_frame.grid(column=1, row=0, sticky=tk.N)
 
-    desc = tk.Text(desc_frame)
+    desc = tk.Text(desc_frame, width=TEXTBOX_WIDTH, height=TEXTBOX_HEIGHT)
     desc.grid(column=0, row=0)
+    get_time_button = tk.Button(desc_frame, text="Calculate durations")
+    get_time_button.grid(column=0, row=1, sticky=tk.W+tk.E)
+    get_time_button.bind("<Button-1>", partial(
+                                            DurationsManager.calculate_times,
+                                            tests=tests))
 
     for index, test in enumerate(tests):
         btn = tk.Button(list_frame, text=test.__name__)
@@ -65,10 +76,6 @@ def _tk_list_tests(tests):
 
     window.mainloop()
 
-    # TODO: Add 'get-estimated-time' button take will calculate for all items
-    # in the current tab (save it into the class for quick access),
-    # and give an estimation of the total run time
-
 
 def forget_children_tabs(_, tab_control):
     """Remove the tabs to the right of the current one."""
@@ -80,6 +87,60 @@ def forget_children_tabs(_, tab_control):
         last_index -= 1
 
     tab_control.pack()
+
+
+class DurationsManager(object):
+    """Aux class to retrieve and cache test run durations."""
+    NAMES_TO_DURATION = {}
+    INQUIRY_CLIENT = None
+
+    @classmethod
+    def calculate_times(cls, _, tests, recursive=False):
+        if not cls.INQUIRY_CLIENT:
+            cls.INQUIRY_CLIENT = ClientResultManager()
+            try:
+                cls.INQUIRY_CLIENT.connect()
+
+            except Exception as error:
+                showerror(None, "Couldn't connect to server: {}".format(error))
+                return
+
+        for test in tests:
+            cls.calculate_component_time(test, recursive)
+
+        showinfo(None, "Done calculating durations")
+
+    @classmethod
+    def calculate_component_time(cls, test, recursive):
+        if issubclass(test, TestCase):
+            all_durations = ""
+            for method_name in test.load_test_method_names():
+                name = test.get_name(method_name)
+                durations = cls._get_durations(name)
+                all_durations += "\n    {} - {}".format(name, durations)
+
+            test._tklist_duration = all_durations
+
+        else:
+            name = test.get_name()
+            durations = cls._get_durations(name)
+            test._tklist_duration = durations
+            if issubclass(test, TestFlow) and recursive:
+                for sub_test in test.blocks:
+                    cls.calculate_component_time(sub_test, recursive)
+
+    @classmethod
+    def _get_durations(cls, test_name):
+        if test_name in cls.NAMES_TO_DURATION:
+            return cls.NAMES_TO_DURATION[test_name]
+
+        try:
+            durations = cls.INQUIRY_CLIENT.get_statistics(test_name)
+            cls.NAMES_TO_DURATION[test_name] = durations
+            return durations
+
+        except Exception as err:
+            return str(err)
 
 
 def _update_desc(_, desc, test):
@@ -94,6 +155,9 @@ def _update_desc(_, desc, test):
         desc.insert(tk.END, test.__name__ + "\n")
         desc.insert(tk.END, "Tags: {}\n".format(test.TAGS))
         desc.insert(tk.END, "Timeout: {} min\n".format(test.TIMEOUT / 60.0))
+        if hasattr(test, '_tklist_duration'):
+            desc.insert(tk.END, "Duration: {}\n".format(test._tklist_duration))
+
         desc.insert(tk.END, "Resource requests:\n")
         for request in test.get_resource_requests():
             desc.insert(tk.END, "  {} = {}({})\n".format(request.name,
@@ -127,15 +191,21 @@ def _explore_case(frame, test):
     desc_frame = ttk.Frame(frame)
     desc_frame.grid(column=1, row=0, sticky=tk.N)
 
-    desc = tk.Text(desc_frame)
+    desc = tk.Text(desc_frame, width=TEXTBOX_WIDTH, height=TEXTBOX_HEIGHT)
     desc.grid(column=0, row=0)
+
+    get_time_button = tk.Button(desc_frame, text="Calculate durations")
+    get_time_button.grid(column=0, row=1, sticky=tk.W+tk.E)
+    get_time_button.bind("<Button-1>", partial(
+                                            DurationsManager.calculate_times,
+                                            tests=[test]))
 
     methods = test.load_test_method_names()
     _update_desc(None, desc, test)
 
     for index, method_name in enumerate(methods):
         label = tk.Label(list_frame, text=test.get_name(method_name))
-        label.grid(column=0, row=index, sticky=tk.W+tk.E)
+        label.grid(column=0, row=index + 1, sticky=tk.W+tk.E)
 
 
 class FlowComponentData(object):
@@ -375,11 +445,25 @@ def _explore_flow(frame, test):
     connection_frame = ttk.Frame(frame)
     connection_frame.grid(column=1, row=1, sticky=tk.N)
 
-    desc = tk.Text(desc_frame)
+    desc = tk.Text(desc_frame, width=TEXTBOX_WIDTH, height=TEXTBOX_HEIGHT / 2)
     desc.grid(column=0, row=0)
 
-    connections = tk.Text(connection_frame)
-    connections.grid(column=0, row=0)
+    get_time_button = tk.Button(connection_frame, text="Calculate duration")
+    get_time_button.grid(column=0, row=1, sticky=tk.W+tk.E)
+    get_time_button.bind("<Button-1>", partial(
+                                            DurationsManager.calculate_times,
+                                            tests=[test],
+                                            recursive=False))
+    get_subtime_button = tk.Button(connection_frame, text="Calculate sub durations")
+    get_subtime_button.grid(column=1, row=1, sticky=tk.W+tk.E)
+    get_subtime_button.bind("<Button-1>", partial(
+                                            DurationsManager.calculate_times,
+                                            tests=[test],
+                                            recursive=True))
+
+    connections = tk.Text(connection_frame, width=TEXTBOX_WIDTH,
+                          height=TEXTBOX_HEIGHT / 2)
+    connections.grid(column=0, row=0, columnspan=2)
 
     flow_data = FlowComponentData(test)
     flow_data.find_unconnected()
@@ -417,6 +501,8 @@ def _update_flow_desc(_, desc, connections, test):
     if test:
         desc.insert(tk.END, test.cls.__name__+"\n")
         desc.insert(tk.END, "Mode = {}\n".format(MODE_TO_STRING[test.mode]))
+        if hasattr(test.cls, '_tklist_duration'):
+            desc.insert(tk.END, "Duration: {}\n".format(test.cls._tklist_duration))
         desc.insert(tk.END, "Resource requests:\n")
         for request in test.cls.get_resource_requests():
             desc.insert(tk.END, "  {} = {}({})\n".format(request.name,
