@@ -90,12 +90,18 @@ def forget_children_tabs(_, tab_control):
 
 
 class DurationsManager(object):
-    """Aux class to retrieve and cache test run durations."""
+    """Aux class to retrieve and cache test run durations.
+
+    Attributes:
+        NAMES_TO_DURATION (dict): durations cache.
+        INQUIRY_CLIENT (ClientResultManager): client instance to inquiry with.
+    """
     NAMES_TO_DURATION = {}
     INQUIRY_CLIENT = None
 
     @classmethod
     def calculate_times(cls, _, tests, recursive=False):
+        """Create client and calculate durations for the given tests."""
         if not cls.INQUIRY_CLIENT:
             cls.INQUIRY_CLIENT = ClientResultManager()
             try:
@@ -106,18 +112,19 @@ class DurationsManager(object):
                 return
 
         for test in tests:
-            cls.calculate_component_time(test, recursive)
+            cls._calculate_component_time(test, recursive)
 
         showinfo(None, "Done calculating durations")
 
     @classmethod
-    def calculate_component_time(cls, test, recursive):
+    def _calculate_component_time(cls, test, recursive):
+        """Calculate duration for the specific test class."""
         if issubclass(test, TestCase):
             all_durations = ""
             for method_name in test.load_test_method_names():
                 name = test.get_name(method_name)
                 durations = cls._get_durations(name)
-                all_durations += "\n    {} - {}".format(name, durations)
+                all_durations += "\n    {}: {}".format(name, durations)
 
             test._tklist_duration = all_durations
 
@@ -127,17 +134,23 @@ class DurationsManager(object):
             test._tklist_duration = durations
             if issubclass(test, TestFlow) and recursive:
                 for sub_test in test.blocks:
-                    cls.calculate_component_time(sub_test, recursive)
+                    cls._calculate_component_time(sub_test, recursive)
 
     @classmethod
     def _get_durations(cls, test_name):
+        """Get durations for a component of the given name."""
         if test_name in cls.NAMES_TO_DURATION:
             return cls.NAMES_TO_DURATION[test_name]
 
         try:
             durations = cls.INQUIRY_CLIENT.get_statistics(test_name)
-            cls.NAMES_TO_DURATION[test_name] = durations
-            return durations
+            formatted_durations = ''
+            for key, value in durations.items():
+                formatted_durations += "\n        {} : {:.1f} sec".format(
+                                                                    key, value)
+
+            cls.NAMES_TO_DURATION[test_name] = formatted_durations
+            return formatted_durations
 
         except Exception as err:
             return str(err)
